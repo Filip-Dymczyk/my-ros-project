@@ -3,7 +3,7 @@ import os
 import rospy
 from std_msgs.msg import String
 from duckietown.dtros import DTROS, NodeType
-from duckietown_msgs.msg import WheelsCmdStamped, WheelEncoderStamped, AntiInstagramThresholds, SegmentList, Segment
+from duckietown_msgs.msg import WheelsCmdStamped, AntiInstagramThresholds, SegmentList, Segment
 from sensor_msgs.msg import CompressedImage
 from .line_detector import LineDetector
 from .detections import Detections
@@ -11,11 +11,11 @@ from .color_range import ColorRange
 from .plot_detections import plotSegments, plotMaps
 import numpy as np
 
-# throttle and direction for each wheel
-THROTTLE_LEFT = 0.5  # 50% throttle
-FORWARD = 1   # forward
-THROTTLE_RIGHT = 0.5 # 30% throttle
-BACKWARD = -1 # backward
+THROTTLE_LEFT = 0.5
+FORWARD = 1 
+THROTTLE_RIGHT = 0.5
+BACKWARD = -1
+
 #https://github.com/duckietown/sim-duckiebot-lanefollowing-demo/blob/master/custom_line_detector/include/line_detector/line_detector2.py
 class LineDetectorNode(DTROS):
     def __init__(self, node_name):
@@ -34,7 +34,7 @@ class LineDetectorNode(DTROS):
         self._wheels_publisher = rospy.Publisher(wheels_topic, WheelsCmdStamped, queue_size=1)
 
         compressed_image_sub = '~camera_node/image/compressed'
-        self.image_sub = rospy.Subscriber(compressed_image_sub, CompressedImage, self.image_callback)
+        self.image_sub = rospy.Subscriber(compressed_image_sub, CompressedImage, self.image_callback, queue_size=1, buff_size=2**24)
         self.threshold_sub = rospy.Subscriber('~anti_instagram_node/thresholds', AntiInstagramThresholds, self.threshold_callback)
         
         # Debug publishers
