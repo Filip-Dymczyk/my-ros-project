@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import os
 import rospy
 import cv2
@@ -33,23 +35,17 @@ class LineDetector(DTROS):
 
         # Proper bridging of compressed image:
         self.bridge = CvBridge()
+        self.img_bgr = None
+        self.falses_detected = 0
 
     def image_callback(self, compressed_image):
-        img_bgr = self.bridge.compressed_imgmsg_to_cv2(compressed_image, desired_encoding="bgr8")
+        if self.img_bgr is None:
+            self.img_bgr = self.bridge.compressed_imgmsg_to_cv2(compressed_image, desired_encoding="bgr8")
 
+    def process_image(self):
         # Crop the image to get only the bottom part (where lines should be) and convert to hsv:
-        height, _, _ = img_bgr.shape
-        cropped_img = img_bgr[int(height * 0.5):height, :] # May require more cropping.
-
-        # Can be tested - from tips:
-        # image_size = (160, 120)
-        # offset = 40
-        # resized_image = cv2.resize(img_bgr, image_size, interpolation=cv2.INTER_NEAREST)
-        # cropped_img = resized_image[offset:, :]
-
-        # Show cropped image (debug):
-        cv2.imshow("Cropped Red Line Detection", cropped_img)
-        cv2.waitKey(1)
+        height, width, _ = self.img_bgr.shape
+        cropped_img = self.img_bgr[int(height * 0.6):int(height * 1.0), :] # May require more cropping.
 
         hsv = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2HSV)
 
@@ -65,13 +61,16 @@ class LineDetector(DTROS):
 
             self.vel_left = self.throttle_left
             self.vel_right = self.throttle_right
+            self.falses_detected = 0
             return
         else:
-            self.throttle_left = 0.5
-            self.throttle_right = 0.5
+            self.falses_detected += 1
+            if self.falses_detected == 20:
+                self.throttle_left = 0.1
+                self.throttle_right = 0.1
 
-            self.vel_left = self.throttle_left * self.forward
-            self.vel_right = self.throttle_right * self.forward
+                self.vel_left = self.throttle_left * self.forward
+                self.vel_right = self.throttle_right * self.forward
         
         # if white_detected:
         # set throttles to 0.1 - spin right in place (left to forward, right to backward) 
@@ -79,9 +78,9 @@ class LineDetector(DTROS):
 
     def detect_red_lines(self, image_hsv) -> bool:
         # HSV ranges for red color:
-        lower_red1 = np.array([0, 120, 70])
+        lower_red1 = np.array([0, 70, 50])
         upper_red1 = np.array([10, 255, 255])
-        lower_red2 = np.array([170, 120, 70])
+        lower_red2 = np.array([170, 70, 50])
         upper_red2 = np.array([180, 255, 255])
 
         # Create masks and join them (red has two separate ranges):
@@ -121,6 +120,9 @@ class LineDetector(DTROS):
         rate = rospy.Rate(10)
 
         while not rospy.is_shutdown():
+            if self.img_bgr is not None:
+                self.process_image()
+                self.img_bgr = None
             message = WheelsCmdStamped(vel_left=self.vel_left, vel_right=self.vel_right)
             self._wheels_publisher.publish(message)
             rate.sleep()
