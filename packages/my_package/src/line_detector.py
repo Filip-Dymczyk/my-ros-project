@@ -28,7 +28,7 @@ class LineDetector(DTROS):
         self.vel_right = 0.0
 
         # Image receiving:
-        compressed_image_sub = 'camera_node/image/compressed'
+        compressed_image_sub = f"{vehicle_name}/camera_node/image/compressed"
         self.image_sub = rospy.Subscriber(compressed_image_sub, CompressedImage, self.image_callback, queue_size=1, buff_size=2**24)
 
         # Proper bridging of compressed image:
