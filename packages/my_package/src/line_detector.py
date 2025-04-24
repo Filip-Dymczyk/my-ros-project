@@ -8,12 +8,17 @@ from cv_bridge import CvBridge
 from duckietown.dtros import DTROS, NodeType
 from duckietown_msgs.msg import WheelsCmdStamped
 from sensor_msgs.msg import CompressedImage
+from enum import Enum
 
 # https://sites.uml.edu/paul-robinette/teaching/eece-5560-spring-2021/assignments/lab-4-lane-detection/
 # https://studentuml-my.sharepoint.com/:p:/g/personal/paul_robinette_uml_edu/EYNnMyiti2JElAKPnppe4j0BGMCEgfuVNojenOs5K7ZsrA?rtime=1adcUyFy3Ug
 # https://studentuml-my.sharepoint.com/:p:/g/personal/paul_robinette_uml_edu/EU9aPbwFeD9Mp670XuVsHM8BYOJ2ibnXKxafNbM3_h5KqA?e=4UA6C2
 
 class LineDetector(DTROS):
+    class Direction(Enum):
+        FORWARD = 1
+        BACKWARD = -1
+
     def __init__(self, node_name):
         super(LineDetector, self).__init__(node_name=node_name, node_type=NodeType.GENERIC)
 
@@ -24,8 +29,7 @@ class LineDetector(DTROS):
         self._wheels_publisher = rospy.Publisher(wheels_topic, WheelsCmdStamped, queue_size=1)
         self.throttle_left = 0.0
         self.throttle_right = 0.0
-        self.forward = 1.0
-        self.backward = -1.0
+        self.direction = self.Direction.FORWARD
         self.vel_left = 0.0
         self.vel_right = 0.0
 
@@ -33,48 +37,31 @@ class LineDetector(DTROS):
         compressed_image_sub = f"{vehicle_name}/camera_node/image/compressed"
         self.image_sub = rospy.Subscriber(compressed_image_sub, CompressedImage, self.image_callback, queue_size=1, buff_size=2**24)
 
+        self.red_detected = False
+        self.yellow_detected = False
+        self.white_detected = False
+        self.falses_detected = 0
+        self.max_falses_count = 20
+        self.turn_counter = 0
+        self.max_turn_count = 5
+
         # Proper bridging of compressed image:
         self.bridge = CvBridge()
         self.img_bgr = None
-        self.falses_detected = 0
 
     def image_callback(self, compressed_image):
         if self.img_bgr is None:
             self.img_bgr = self.bridge.compressed_imgmsg_to_cv2(compressed_image, desired_encoding="bgr8")
+    
+    def detect_lines(self, mask) -> bool:
+        # Prepare for Hough transform:
+        blurred = cv2.GaussianBlur(mask, (5, 5), 0)
+        edges = cv2.Canny(blurred, 50, 150)
 
-    def process_image(self):
-        # Crop the image to get only the bottom part (where lines should be) and convert to hsv:
-        height, width, _ = self.img_bgr.shape
-        cropped_img = self.img_bgr[int(height * 0.6):int(height * 1.0), :] # May require more cropping.
+        # Detect lines using probability Hough transform:
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 100, minLineLength=50, maxLineGap=10)
 
-        hsv = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2HSV)
-
-        red_detected = self.detect_red_lines(hsv)
-        yellow_detected = self.detect_yellow_lines(hsv)
-        white_detected = self.detect_white_lines(hsv)
-        rospy.loginfo(f"Detected: red-yellow-white -> {red_detected}-{yellow_detected}-{white_detected}")
-
-        # These might need to be done inside run:
-        if red_detected:
-            self.throttle_left = 0.0
-            self.throttle_right = 0.0
-
-            self.vel_left = self.throttle_left
-            self.vel_right = self.throttle_right
-            self.falses_detected = 0
-            return
-        else:
-            self.falses_detected += 1
-            if self.falses_detected == 20:
-                self.throttle_left = 0.1
-                self.throttle_right = 0.1
-
-                self.vel_left = self.throttle_left * self.forward
-                self.vel_right = self.throttle_right * self.forward
-        
-        # if white_detected:
-        # set throttles to 0.1 - spin right in place (left to forward, right to backward) 
-        # if white line is not detected no more  - 0.5 forward to both
+        return lines is not None
 
     def detect_red_lines(self, image_hsv) -> bool:
         # HSV ranges for red color:
@@ -90,6 +77,17 @@ class LineDetector(DTROS):
 
         return self.detect_lines(red_mask)
 
+    def detect_white_lines(self, image_hsv) -> bool:
+        # HSV ranges for white color:
+        lower_white = np.array([0, 0, 200])
+        upper_white = np.array([180, 30, 255])
+        #lower_white = np.array([0, 0, 180])
+        #upper_white = np.array([180, 50, 255])
+
+        white_mask = cv2.inRange(image_hsv, lower_white, upper_white)
+
+        return self.detect_lines(white_mask)
+
     def detect_yellow_lines(self, image_hsv) -> bool:
         # HSV ranges for yellow color:
         lower_yellow = np.array([20, 100, 100])
@@ -98,31 +96,66 @@ class LineDetector(DTROS):
 
         return self.detect_lines(yellow_mask)
     
-    def detect_white_lines(self, image_hsv) -> bool:
-        # HSV ranges for white color:
-        lower_white = np.array([0, 0, 200])
-        upper_white = np.array([180, 30, 255])
-        white_mask = cv2.inRange(image_hsv, lower_white, upper_white)
+    def start_lines_detection(self):
+        # Crop the image to get only the bottom part (where lines should be) and convert to hsv:
+        height, _, _ = self.img_bgr.shape
+        cropped_img = self.img_bgr[int(height * 0.6):int(height * 1.0), :] # May require more cropping.
 
-        return self.detect_lines(white_mask)
+        hsv = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2HSV)
 
-    def detect_lines(self, mask) -> bool:
-        # Prepare for Hough transform:
-        blurred = cv2.GaussianBlur(mask, (5, 5), 0)
-        edges = cv2.Canny(blurred, 50, 150)
+        self.red_detected = self.detect_red_lines(hsv)
+        self.yellow_detected = self.detect_yellow_lines(hsv)
+        self.white_detected = self.detect_white_lines(hsv)
+        rospy.loginfo(f"Detected: red-yellow-white -> {self.red_detected}-{self.yellow_detected}-{self.white_detected}")
+    
+    def set_speed(self, turn_right = False) -> None:
+        if turn_right:
+            self.vel_right = self.throttle_right * self.Direction.BACKWARD
+            self.vel_left = self.throttle_left * self.Direction.FORWARD
+        else:
+            self.vel_right = self.throttle_right * self.direction
+            self.vel_left = self.throttle_left * self.direction
 
-        # Detect lines using probability Hough transform:
-        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 100, minLineLength=50, maxLineGap=10)
+    def handle_red_lines(self) -> None:
+        if self.red_detected:
+            self.throttle_left = 0.0
+            self.throttle_right = 0.0
+            self.set_speed()
+            self.falses_detected = 0
+        else:
+            self.falses_detected += 1
+            if self.falses_detected == self.max_falses_count:
+                self.throttle_left = 0.1
+                self.throttle_right = 0.1
+                self.direction = self.Direction.FORWARD
+                self.set_speed()
+    
+    def handle_white_lines(self) -> None:
+        if self.white_detected:
+            if self.turn_counter < self.max_turn_count:
+                self.throttle_left = 0.1
+                self.throttle_right = 0.1
+                self.set_speed(turn_right = True)
+                self.turn_counter += 1
+        else:
+            self.turn_counter = 0
 
-        return lines is not None
+    def update_control(self) -> None:
+        self.handle_red_lines()
+
+        # Red detection terminates other behaviors:
+        if not self.red_detected:
+            self.handle_white_lines()
+            # self.handle_yellow_lines()
     
     def run(self):
         rate = rospy.Rate(10)
 
         while not rospy.is_shutdown():
             if self.img_bgr is not None:
-                self.process_image()
+                self.start_lines_detection()
                 self.img_bgr = None
+                self.update_control()
             message = WheelsCmdStamped(vel_left=self.vel_left, vel_right=self.vel_right)
             self._wheels_publisher.publish(message)
             rate.sleep()
