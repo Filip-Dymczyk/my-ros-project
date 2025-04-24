@@ -10,10 +10,6 @@ from duckietown_msgs.msg import WheelsCmdStamped
 from sensor_msgs.msg import CompressedImage
 from enum import Enum
 
-# https://sites.uml.edu/paul-robinette/teaching/eece-5560-spring-2021/assignments/lab-4-lane-detection/
-# https://studentuml-my.sharepoint.com/:p:/g/personal/paul_robinette_uml_edu/EYNnMyiti2JElAKPnppe4j0BGMCEgfuVNojenOs5K7ZsrA?rtime=1adcUyFy3Ug
-# https://studentuml-my.sharepoint.com/:p:/g/personal/paul_robinette_uml_edu/EU9aPbwFeD9Mp670XuVsHM8BYOJ2ibnXKxafNbM3_h5KqA?e=4UA6C2
-
 class LineDetector(DTROS):
     class Direction(Enum):
         FORWARD = 1
@@ -42,6 +38,7 @@ class LineDetector(DTROS):
         self.white_detected = False
         self.falses_detected = 0
         self.max_falses_count = 20
+        self.turning = False
         self.turn_counter = 0
         self.max_turn_count = 5
 
@@ -49,7 +46,7 @@ class LineDetector(DTROS):
         self.bridge = CvBridge()
         self.img_bgr = None
 
-    def image_callback(self, compressed_image):
+    def image_callback(self, compressed_image) -> None:
         if self.img_bgr is None:
             self.img_bgr = self.bridge.compressed_imgmsg_to_cv2(compressed_image, desired_encoding="bgr8")
     
@@ -79,10 +76,8 @@ class LineDetector(DTROS):
 
     def detect_white_lines(self, image_hsv) -> bool:
         # HSV ranges for white color:
-        lower_white = np.array([0, 0, 200])
-        upper_white = np.array([180, 30, 255])
-        #lower_white = np.array([0, 0, 180])
-        #upper_white = np.array([180, 50, 255])
+        lower_white = np.array([0, 0, 180])
+        upper_white = np.array([180, 50, 255])
 
         white_mask = cv2.inRange(image_hsv, lower_white, upper_white)
 
@@ -96,10 +91,13 @@ class LineDetector(DTROS):
 
         return self.detect_lines(yellow_mask)
     
-    def start_lines_detection(self):
+    def start_lines_detection(self) -> None:
         # Crop the image to get only the bottom part (where lines should be) and convert to hsv:
-        height, _, _ = self.img_bgr.shape
-        cropped_img = self.img_bgr[int(height * 0.6):int(height * 1.0), :] # May require more cropping.
+        height, width, _ = self.img_bgr.shape
+        
+        center_x = width // 2
+        crop_width = width
+        cropped_img = self.img_bgr[int(height * 0.6):int(height * 1.0), center_x - crop_width // 4 : center_x + crop_width // 4] # May require more cropping.
 
         hsv = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2HSV)
 
@@ -110,17 +108,20 @@ class LineDetector(DTROS):
     
     def set_speed(self, turn_right = False) -> None:
         if turn_right:
-            self.vel_right = self.throttle_right * self.Direction.BACKWARD
-            self.vel_left = self.throttle_left * self.Direction.FORWARD
+            self.vel_right = self.throttle_right * float(self.Direction.BACKWARD.value)
+            self.vel_left = self.throttle_left * float(self.Direction.FORWARD.value)
         else:
-            self.vel_right = self.throttle_right * self.direction
-            self.vel_left = self.throttle_left * self.direction
+            self.vel_right = self.throttle_right * float(self.direction.value)
+            self.vel_left = self.throttle_left * float(self.direction.value)
 
     def handle_red_lines(self) -> None:
+        # Already turning.
+        if self.turning:
+            return
+        
         if self.red_detected:
             self.throttle_left = 0.0
             self.throttle_right = 0.0
-            self.set_speed()
             self.falses_detected = 0
         else:
             self.falses_detected += 1
@@ -128,17 +129,27 @@ class LineDetector(DTROS):
                 self.throttle_left = 0.1
                 self.throttle_right = 0.1
                 self.direction = self.Direction.FORWARD
-                self.set_speed()
+        self.set_speed()
+        
     
     def handle_white_lines(self) -> None:
         if self.white_detected:
-            if self.turn_counter < self.max_turn_count:
-                self.throttle_left = 0.1
-                self.throttle_right = 0.1
-                self.set_speed(turn_right = True)
-                self.turn_counter += 1
+            self.turning = True
+            self.turn_cycles = 0 
+
+        if self.turning:
+            if self.turn_cycles < self.max_turn_count:
+                self.throttle_left = 0.2
+                self.throttle_right = 0.2
+                self.set_speed(turn_right=True)
+                self.turn_cycles += 1
+            else:
+                self.turning = False
+                self.turn_cycles = 0
+
         else:
-            self.turn_counter = 0
+            self.turning = False
+            self.turn_cycles = 0
 
     def update_control(self) -> None:
         self.handle_red_lines()
@@ -146,9 +157,8 @@ class LineDetector(DTROS):
         # Red detection terminates other behaviors:
         if not self.red_detected:
             self.handle_white_lines()
-            # self.handle_yellow_lines()
     
-    def run(self):
+    def run(self) -> None:
         rate = rospy.Rate(10)
 
         while not rospy.is_shutdown():
